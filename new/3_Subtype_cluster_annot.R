@@ -305,6 +305,123 @@ ggsave(file.path(plot_dir, "umap_T_annotated.pdf"),
 message("saved umap_T_annotated.pdf")
 rm(sce, df); gc()
 
+library(UCell)
+
+naive_genes    <- c("LEF1", "SATB1", "CCR7", "SELL", "TCF7", "IL7R", "NELL2")
+effector_genes <- c("GZMB", "GZMK", "PRF1", "GNLY", "NKG7", "IFNG", "TNF")
+ifn_genes      <- c("MX1", "STAT1", "ISG15", "IFITM1", "IFI6", "IFI44L", "OAS1")
+
+sce_t <- readH5AD(file.path(bt_dir, "T_scgpt_annotated.h5ad"))
+
+scores <- ScoreSignatures_UCell(
+  assay(sce_t, "logcounts"),
+  features = list(
+    Naive_score    = naive_genes,
+    Effector_score = effector_genes,
+    IFN_score      = ifn_genes
+  )
+)
+
+df_t <- as.data.frame(colData(sce_t))
+df_t$Naive_score    <- scores[, "Naive_score_UCell"]
+df_t$Effector_score <- scores[, "Effector_score_UCell"]
+df_t$IFN_score      <- scores[, "IFN_score_UCell"]
+
+# compare scores within IFN-stimulated vs other clusters
+df_t %>%
+  group_by(cell_type_T) %>%
+  summarise(
+    mean_naive    = mean(Naive_score),
+    mean_effector = mean(Effector_score),
+    mean_ifn      = mean(IFN_score)
+  ) %>%
+  arrange(desc(mean_ifn))
+
+df_t %>%
+  filter(!is.na(cell_type_T)) %>%
+  group_by(timepoint, cell_type_T) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(timepoint) %>%
+  mutate(prop = n / sum(n)) %>%
+  filter(cell_type_T == "IFN-stimulated T cell") %>%
+  arrange(timepoint) %>%
+  print(n = Inf)
+
+ifn_props <- df_t %>%
+  mutate(lineage = "T") %>%
+  group_by(donor, timepoint, vaccine, lineage) %>%
+  summarise(
+    ifn_prop = mean(cell_type_T == "IFN-stimulated T cell"),
+    .groups = "drop"
+  )
+
+# check structure
+print(ifn_props %>% arrange(vaccine, timepoint))
+
+# proportion of IFN-stimulated T cells per timepoint per vaccine
+ifn_props %>%
+  group_by(vaccine, timepoint) %>%
+  summarise(
+    mean_prop = mean(ifn_prop),
+    sd_prop   = sd(ifn_prop),
+    n_donors  = n(),
+    .groups   = "drop"
+  ) %>%
+  arrange(vaccine, timepoint) %>%
+  print(n = Inf)
+
+library(ggplot2)
+
+# convert timepoint to numeric for plotting
+timepoint_days <- c(
+  "d0" = 0, "d8" = 8, "d15" = 15, "d28" = 28,
+  "d28+d35" = 31, "d35" = 35, "d57" = 57, "d60" = 60,
+  "d110" = 110, "d121" = 121, "d180" = 180,
+  "d181" = 181, "d201" = 201
+)
+
+ifn_summary <- ifn_props %>%
+  group_by(vaccine, timepoint) %>%
+  summarise(
+    mean_prop = mean(ifn_prop),
+    sd_prop   = sd(ifn_prop),
+    n_donors  = n(),
+    se_prop   = sd_prop / sqrt(n_donors),
+    .groups   = "drop"
+  ) %>%
+  mutate(day = timepoint_days[as.character(timepoint)])
+
+ggplot(ifn_summary, aes(x = day, y = mean_prop * 100,
+                        color = vaccine, group = vaccine)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(aes(size = n_donors)) +
+  geom_errorbar(
+    aes(ymin = (mean_prop - se_prop) * 100,
+        ymax = (mean_prop + se_prop) * 100),
+    width = 3
+  ) +
+  scale_color_manual(values = c(
+    "Fluarix"   = "#E63946",
+    "covidmRNA" = "#457B9D",
+    "mRNA-1010" = "#2A9D8F"
+  )) +
+  scale_size_continuous(range = c(2, 5), name = "n donors") +
+  labs(
+    x     = "Days post vaccination",
+    y     = "IFN-stimulated T cells (%)",
+    color = "Vaccine",
+    title = "IFN-stimulated T cell kinetics post vaccination"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             color = "grey50", linewidth = 0.5)
+
+ggsave(file.path(plot_dir, "IFN_T_kinetics_by_vaccine.pdf"),
+       width = 10, height = 6)
 # ══════════════════════════════════════════════════════════════════
 # COMBINED PANEL
 # ══════════════════════════════════════════════════════════════════
