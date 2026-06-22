@@ -215,3 +215,118 @@ nk_res      <- recluster(nk_obj,      resolution = 0.2, lineage_name = "NK",    
 b_res       <- recluster(b_obj,       resolution = 0.3, lineage_name = "B",       out_dir = out)
 plasma_res  <- recluster(plasma_obj,  resolution = 0.2, lineage_name = "Plasma",  out_dir = out)
 myeloid_res <- recluster(myeloid_obj, resolution = 0.3, lineage_name = "Myeloid", out_dir = out)
+
+
+#!/usr/bin/env Rscript
+# =============================================================================
+# 01_convert_rds_to_h5ad.R
+# Convert subsetted & reclustered Seurat RDS files to h5ad using zellkonverter
+#
+# Pipeline: Seurat RDS → SingleCellExperiment → writeH5AD()
+# No intermediate h5Seurat file; no SeuratDisk dependency.
+#
+# Usage:
+#   Rscript 01_convert_rds_to_h5ad.R \
+#     --rds_dir  results/subclustering \
+#     --out_dir  results/h5ad \
+#     [--assay   RNA] \
+#     [--compression gzip]
+# =============================================================================
+
+suppressPackageStartupMessages({
+  library(optparse)
+  library(Seurat)
+  library(SingleCellExperiment)
+  library(zellkonverter)
+})
+
+# ── CLI arguments ─────────────────────────────────────────────────────────────
+option_list <- list(
+  make_option("--rds_dir",
+              type    = "character",
+              default = "results/subclustering",
+              help    = "Directory containing *_reclustered.rds files [default: %default]"),
+  make_option("--out_dir",
+              type    = "character",
+              default = "results/h5ad",
+              help    = "Output directory for .h5ad files [default: %default]"),
+  make_option("--assay",
+              type    = "character",
+              default = "RNA",
+              help    = "Seurat assay to use as AnnData X [default: %default]"),
+  make_option("--compression",
+              type    = "character",
+              default = "gzip",
+              help    = "h5ad compression: none | gzip | lzf [default: %default]")
+)
+
+opt <- parse_args(OptionParser(option_list = option_list))
+
+dir.create(opt$out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ── Find RDS files ────────────────────────────────────────────────────────────
+rds_files <- list.files(opt$rds_dir,
+                        pattern    = "_reclustered\\.rds$",
+                        full.names = TRUE)
+
+if (length(rds_files) == 0) {
+  stop("No *_reclustered.rds files found in: ", opt$rds_dir)
+}
+
+message("Found ", length(rds_files), " RDS file(s):\n",
+        paste(" -", basename(rds_files), collapse = "\n"))
+
+# ── Conversion helper ─────────────────────────────────────────────────────────
+convert_one <- function(rds_path, out_dir, assay = "RNA", compression = "gzip") {
+
+  lineage <- sub("_reclustered\\.rds$", "", basename(rds_path))
+  message("\n[", lineage, "] Loading RDS...")
+  obj <- readRDS(rds_path)
+
+  DefaultAssay(obj) <- assay
+
+  # Seurat v5 stores data in layers (counts / data / scale.data).
+  # as.SingleCellExperiment() handles this automatically, but we make sure
+  # counts and normalised data are available as separate assay slots in SCE.
+  message("[", lineage, "] Converting Seurat → SingleCellExperiment...")
+  sce <- as.SingleCellExperiment(obj, assay = assay)
+
+  # as.SingleCellExperiment maps:
+  #   counts layer  → assay "counts"
+  #   data layer    → assay "logcounts"   (standard SCE convention)
+  #   scale.data    → assay "scaledata"   (if present)
+  #   reductions    → reducedDims (PCA, UMAP, etc.)
+  #   meta.data     → colData
+
+  # Tell zellkonverter to put logcounts in X (scanpy convention after
+  # normalisation); raw counts will land in a layer called "counts".
+  # If you want raw counts in X instead, change X_name = "counts".
+  message("[", lineage, "] Writing h5ad (X = logcounts)...")
+  h5ad_path <- file.path(out_dir, paste0(lineage, ".h5ad"))
+
+  writeH5AD(
+    sce,
+    file        = h5ad_path,
+    X_name      = "logcounts",   # goes into AnnData.X
+    compression = compression,
+    verbose     = TRUE
+  )
+
+  message("[", lineage, "] Written: ", normalizePath(h5ad_path))
+  return(h5ad_path)
+}
+
+# ── Run over all files ────────────────────────────────────────────────────────
+h5ad_paths <- vapply(
+  rds_files,
+  convert_one,
+  FUN.VALUE   = character(1),
+  out_dir     = opt$out_dir,
+  assay       = opt$assay,
+  compression = opt$compression
+)
+
+message("\n=== Conversion complete ===")
+message("h5ad files written to: ", normalizePath(opt$out_dir))
+message(paste(" -", basename(h5ad_paths), collapse = "\n"))
+
